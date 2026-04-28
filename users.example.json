@@ -1,0 +1,14 @@
+{
+  "users": [
+    {
+      "name": "Romain",
+      "discordId": "242997114139836417",
+      "solidtime": {
+        "memberId": "f5b5d936-5958-4ba5-807e-e27ab728b60f",
+        "userId": "e575c888-8b4f-41df-b4b3-000c5cefb8f8"
+      },
+      "locale": "fr-FR",
+      "offDays": []
+    }
+  ]
+}

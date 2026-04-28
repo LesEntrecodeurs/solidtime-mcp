@@ -1,0 +1,19 @@
+node_modules
+build/*
+
+.env
+.env.local
+
+# Local user mapping (Discord <-> SolidTime). Real config stays out of git.
+users.json
+
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*
+
+.DS_Store
+*.log

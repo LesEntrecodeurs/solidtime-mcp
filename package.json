@@ -1,0 +1,30 @@
+{
+  "name": "solidtime-mcp",
+  "type": "module",
+  "version": "0.0.1",
+  "description": "MCP server exposing SolidTime time-tracking operations",
+  "bin": {
+    "solidtime": "./build/index.js"
+  },
+  "scripts": {
+    "build": "tsc && chmod 755 build/index.js",
+    "dev": "node build/index.js",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "files": [
+    "build"
+  ],
+  "packageManager": "yarn@4.5.2",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.1",
+    "axios": "^1.12.2",
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.2.3",
+    "zod": "3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "prettier": "^3.5.3",
+    "typescript": "^5.9.2"
+  }
+}
