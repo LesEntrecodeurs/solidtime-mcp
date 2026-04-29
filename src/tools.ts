@@ -7,8 +7,23 @@ import {
   findUserByName,
   loadUsers
 } from './shared/users.js';
+import {
+  EnrichedEntry,
+  FormatContext,
+  enrichEntry,
+  summarizeEntries,
+  summarizeEntry,
+  timezoneForMember
+} from './shared/format.js';
+import {
+  SolidTimeClient,
+  SolidTimeProject,
+  SolidTimeTask,
+  SolidTimeTimeEntry
+} from './shared/types.js';
 
 const SOLIDTIME_DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ss'Z'";
+const CACHE_TTL_MS = 60_000;
 
 function toSolidTimeDate(input: string | Date): string {
   const d = typeof input === 'string' ? new Date(input) : input;
@@ -28,7 +43,16 @@ const errorPayload = (msg: string) => ({
   structuredContent: { error: msg }
 });
 
+interface CacheEntry<T> {
+  at: number;
+  data: T;
+}
+
 export class Tools {
+  private projectsCache: CacheEntry<Map<string, SolidTimeProject>> | null = null;
+  private clientsCache: CacheEntry<Map<string, SolidTimeClient>> | null = null;
+  private tasksCache: CacheEntry<Map<string, SolidTimeTask>> | null = null;
+
   constructor(
     public server: McpServer,
     private tracker: TimeTracker
@@ -39,6 +63,69 @@ export class Tools {
     this.registerUserTools();
     this.registerTimerTools();
     this.registerTimeEntryTools();
+  }
+
+  private async getProjectsMap(): Promise<Map<string, SolidTimeProject>> {
+    if (
+      this.projectsCache &&
+      Date.now() - this.projectsCache.at < CACHE_TTL_MS
+    ) {
+      return this.projectsCache.data;
+    }
+    const list = await this.tracker.listProjects();
+    const map = new Map(list.map((p) => [p.id, p]));
+    this.projectsCache = { at: Date.now(), data: map };
+    return map;
+  }
+
+  private async getClientsMap(): Promise<Map<string, SolidTimeClient>> {
+    if (this.clientsCache && Date.now() - this.clientsCache.at < CACHE_TTL_MS) {
+      return this.clientsCache.data;
+    }
+    const list = await this.tracker.listClients();
+    const map = new Map(list.map((c) => [c.id, c]));
+    this.clientsCache = { at: Date.now(), data: map };
+    return map;
+  }
+
+  private async getTasksMap(): Promise<Map<string, SolidTimeTask>> {
+    if (this.tasksCache && Date.now() - this.tasksCache.at < CACHE_TTL_MS) {
+      return this.tasksCache.data;
+    }
+    const list = await this.tracker.listTasks();
+    const map = new Map(list.map((t) => [t.id, t]));
+    this.tasksCache = { at: Date.now(), data: map };
+    return map;
+  }
+
+  private async buildFormatContext(
+    memberId?: string,
+    timezoneOverride?: string,
+    options: { withTasks?: boolean } = {}
+  ): Promise<FormatContext> {
+    const [projectsById, clientsById, tasksById] = await Promise.all([
+      this.getProjectsMap(),
+      this.getClientsMap(),
+      options.withTasks ? this.getTasksMap() : Promise.resolve(new Map())
+    ]);
+    return {
+      tz: timezoneOverride ?? timezoneForMember(memberId),
+      projectsById,
+      clientsById,
+      tasksById
+    };
+  }
+
+  private async enrichOne(
+    entry: SolidTimeTimeEntry,
+    timezoneOverride?: string
+  ): Promise<EnrichedEntry> {
+    const ctx = await this.buildFormatContext(
+      entry.member_id ?? undefined,
+      timezoneOverride,
+      { withTasks: !!entry.task_id }
+    );
+    return enrichEntry(entry, ctx);
   }
 
   private registerListTools() {
@@ -212,28 +299,34 @@ export class Tools {
       {
         title: 'Get active timer',
         description:
-          'Return the running time entry for the given member, or for the API token holder if memberId is omitted. Returns null if no timer is running.',
+          'Return the running time entry for the given member, or for the API token holder if memberId is omitted. Returns null if no timer is running. Times are formatted in the user timezone (Europe/Paris by default).',
         inputSchema: {
           memberId: z
             .string()
             .uuid()
             .optional()
-            .describe('SolidTime member_id. Omit to query the API token holder.')
+            .describe('SolidTime member_id. Omit to query the API token holder.'),
+          timezone: z
+            .string()
+            .optional()
+            .describe('IANA timezone for the formatted times (e.g. Europe/Paris).')
         },
         outputSchema: { data: z.any() }
       },
-      async ({ memberId }) => {
+      async ({ memberId, timezone }) => {
         const data = await this.tracker.getActiveTimer(memberId);
+        if (!data) {
+          return {
+            content: [{ type: 'text', text: 'Aucun timer actif.' }],
+            structuredContent: { data: null }
+          };
+        }
+        const enriched = await this.enrichOne(data, timezone);
         return {
           content: [
-            {
-              type: 'text',
-              text: data
-                ? `Timer actif: ${JSON.stringify(data)}`
-                : 'Aucun timer actif.'
-            }
+            { type: 'text', text: `Timer actif:\n- ${summarizeEntry(enriched)}` }
           ],
-          structuredContent: { data }
+          structuredContent: { data: enriched }
         };
       }
     );
@@ -270,7 +363,11 @@ export class Tools {
             .optional()
             .describe(
               'ISO 8601 start time. Defaults to "now". Will be coerced to UTC "Y-m-d\\TH:i:s\\Z".'
-            )
+            ),
+          timezone: z
+            .string()
+            .optional()
+            .describe('IANA timezone for the formatted times (e.g. Europe/Paris).')
         },
         outputSchema: { data: z.any() }
       },
@@ -281,7 +378,8 @@ export class Tools {
         taskId,
         billable,
         tagIds,
-        start
+        start,
+        timezone
       }) => {
         const existing = await this.tracker.getActiveTimer(memberId);
         if (existing) {
@@ -301,14 +399,15 @@ export class Tools {
           tags: tagIds && tagIds.length ? tagIds : null
         });
 
+        const enriched = await this.enrichOne(created, timezone);
         return {
           content: [
             {
               type: 'text',
-              text: `Timer démarré: ${JSON.stringify(created)}`
+              text: `Timer démarré:\n- ${summarizeEntry(enriched)}`
             }
           ],
-          structuredContent: { data: created }
+          structuredContent: { data: enriched }
         };
       }
     );
@@ -324,11 +423,15 @@ export class Tools {
           end: z
             .string()
             .optional()
-            .describe('ISO 8601 end time. Defaults to "now".')
+            .describe('ISO 8601 end time. Defaults to "now".'),
+          timezone: z
+            .string()
+            .optional()
+            .describe('IANA timezone for the formatted times (e.g. Europe/Paris).')
         },
         outputSchema: { data: z.any() }
       },
-      async ({ memberId, end }) => {
+      async ({ memberId, end, timezone }) => {
         const active = await this.tracker.getActiveTimer(memberId);
         if (!active) {
           return {
@@ -339,11 +442,12 @@ export class Tools {
         const updated = await this.tracker.updateTimeEntry(active.id, {
           end: end ? toSolidTimeDate(end) : nowSolidTime()
         });
+        const enriched = await this.enrichOne(updated, timezone);
         return {
           content: [
-            { type: 'text', text: `Timer arrêté: ${JSON.stringify(updated)}` }
+            { type: 'text', text: `Timer arrêté:\n- ${summarizeEntry(enriched)}` }
           ],
-          structuredContent: { data: updated }
+          structuredContent: { data: enriched }
         };
       }
     );
@@ -355,7 +459,7 @@ export class Tools {
       {
         title: 'List time entries',
         description:
-          'List time entries with optional filters. Dates must be ISO 8601 (will be coerced to UTC).',
+          'List time entries with optional filters. Dates must be ISO 8601 (will be coerced to UTC). Times in the response are formatted in the user timezone (Europe/Paris by default).',
         inputSchema: {
           memberId: z.string().uuid().optional(),
           memberIds: z.array(z.string().uuid()).optional(),
@@ -368,7 +472,11 @@ export class Tools {
           active: z.boolean().optional(),
           billable: z.boolean().optional(),
           limit: z.number().int().min(1).max(500).optional(),
-          offset: z.number().int().min(0).optional()
+          offset: z.number().int().min(0).optional(),
+          timezone: z
+            .string()
+            .optional()
+            .describe('IANA timezone for the formatted times (e.g. Europe/Paris).')
         },
         outputSchema: { data: z.any() }
       },
@@ -387,14 +495,15 @@ export class Tools {
           limit: args.limit,
           offset: args.offset
         });
+
+        const needsTasks = data.some((e) => !!e.task_id);
+        const ctx = await this.buildFormatContext(args.memberId, args.timezone, {
+          withTasks: needsTasks
+        });
+        const enriched = data.map((e) => enrichEntry(e, ctx));
         return {
-          content: [
-            {
-              type: 'text',
-              text: `Entrées (${data.length}): ${JSON.stringify(data)}`
-            }
-          ],
-          structuredContent: { data }
+          content: [{ type: 'text', text: summarizeEntries(enriched) }],
+          structuredContent: { data: enriched }
         };
       }
     );
@@ -413,7 +522,11 @@ export class Tools {
           description: z.string().max(5000).optional(),
           projectId: z.string().uuid().optional(),
           taskId: z.string().uuid().optional(),
-          tagIds: z.array(z.string().uuid()).optional()
+          tagIds: z.array(z.string().uuid()).optional(),
+          timezone: z
+            .string()
+            .optional()
+            .describe('IANA timezone for the formatted times (e.g. Europe/Paris).')
         },
         outputSchema: { data: z.any() }
       },
@@ -425,7 +538,8 @@ export class Tools {
         description,
         projectId,
         taskId,
-        tagIds
+        tagIds,
+        timezone
       }) => {
         const data = await this.tracker.createTimeEntry({
           member_id: memberId,
@@ -437,11 +551,12 @@ export class Tools {
           task_id: taskId ?? null,
           tags: tagIds && tagIds.length ? tagIds : null
         });
+        const enriched = await this.enrichOne(data, timezone);
         return {
           content: [
-            { type: 'text', text: `Entrée créée: ${JSON.stringify(data)}` }
+            { type: 'text', text: `Entrée créée:\n- ${summarizeEntry(enriched)}` }
           ],
-          structuredContent: { data }
+          structuredContent: { data: enriched }
         };
       }
     );
@@ -460,7 +575,11 @@ export class Tools {
           description: z.string().max(5000).nullable().optional(),
           projectId: z.string().uuid().nullable().optional(),
           taskId: z.string().uuid().nullable().optional(),
-          tagIds: z.array(z.string().uuid()).nullable().optional()
+          tagIds: z.array(z.string().uuid()).nullable().optional(),
+          timezone: z
+            .string()
+            .optional()
+            .describe('IANA timezone for the formatted times (e.g. Europe/Paris).')
         },
         outputSchema: { data: z.any() }
       },
@@ -473,7 +592,8 @@ export class Tools {
         description,
         projectId,
         taskId,
-        tagIds
+        tagIds,
+        timezone
       }) => {
         const payload: Record<string, unknown> = {};
         if (memberId !== undefined) payload.member_id = memberId;
@@ -487,11 +607,15 @@ export class Tools {
         if (tagIds !== undefined) payload.tags = tagIds;
 
         const data = await this.tracker.updateTimeEntry(timeEntryId, payload);
+        const enriched = await this.enrichOne(data, timezone);
         return {
           content: [
-            { type: 'text', text: `Entrée mise à jour: ${JSON.stringify(data)}` }
+            {
+              type: 'text',
+              text: `Entrée mise à jour:\n- ${summarizeEntry(enriched)}`
+            }
           ],
-          structuredContent: { data }
+          structuredContent: { data: enriched }
         };
       }
     );

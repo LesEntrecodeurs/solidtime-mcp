@@ -105,5 +105,6 @@ export interface UserMapping {
     userId: string;
   };
   locale?: string;
+  timezone?: string;
   offDays?: string[];
 }
