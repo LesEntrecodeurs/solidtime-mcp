@@ -22,9 +22,11 @@ import {
   SolidTimeTimeEntry
 } from './shared/types.js';
 
-const SOLIDTIME_DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ss'Z'";
+import { logger } from "./lib/logger.js"
+
 const CACHE_TTL_MS = 60_000;
 
+// Convertit une Date ou une string ISO en format UTC compatible SolidTime.
 function toSolidTimeDate(input: string | Date): string {
   const d = typeof input === 'string' ? new Date(input) : input;
   if (Number.isNaN(d.getTime())) {
@@ -33,16 +35,19 @@ function toSolidTimeDate(input: string | Date): string {
   return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
+// Retourne la date actuelle au format UTC compatible SolidTime.
 function nowSolidTime(): string {
   return toSolidTimeDate(new Date());
 }
 
+// Construit une réponse MCP d’erreur standardisée.
 const errorPayload = (msg: string) => ({
   content: [{ type: 'text' as const, text: msg }],
   isError: true,
   structuredContent: { error: msg }
 });
 
+// Représente une entrée de cache avec son timestamp de création.
 interface CacheEntry<T> {
   at: number;
   data: T;
@@ -58,13 +63,23 @@ export class Tools {
     private tracker: TimeTracker
   ) {}
 
+  // Initialise tous les groupes d’outils MCP.
   async hydrate() {
+    console.error('[MCP] hydrate:start');
+
     this.registerListTools();
+    console.error('[MCP] hydrate:listTools registered');
+
     this.registerUserTools();
-    this.registerTimerTools();
+    console.error('[MCP] hydrate:userTools registered');
+
     this.registerTimeEntryTools();
+    console.error('[MCP] hydrate:timeEntryTools registered');
+
+    console.error('[MCP] hydrate:done');
   }
 
+  // Récupère les projets SolidTime et les met en cache temporairement.
   private async getProjectsMap(): Promise<Map<string, SolidTimeProject>> {
     if (
       this.projectsCache &&
@@ -78,6 +93,7 @@ export class Tools {
     return map;
   }
 
+  // Récupère les clients SolidTime et les met en cache temporairement.
   private async getClientsMap(): Promise<Map<string, SolidTimeClient>> {
     if (this.clientsCache && Date.now() - this.clientsCache.at < CACHE_TTL_MS) {
       return this.clientsCache.data;
@@ -88,6 +104,7 @@ export class Tools {
     return map;
   }
 
+  // Récupère les tâches SolidTime et les met en cache temporairement.
   private async getTasksMap(): Promise<Map<string, SolidTimeTask>> {
     if (this.tasksCache && Date.now() - this.tasksCache.at < CACHE_TTL_MS) {
       return this.tasksCache.data;
@@ -98,6 +115,7 @@ export class Tools {
     return map;
   }
 
+  // Construit le contexte de formatage : fuseau horaire, projets, clients et tâches.
   private async buildFormatContext(
     memberId?: string,
     timezoneOverride?: string,
@@ -116,6 +134,7 @@ export class Tools {
     };
   }
 
+  // Enrichit une entrée de temps avec les informations projet/client/tâche et le fuseau horaire.
   private async enrichOne(
     entry: SolidTimeTimeEntry,
     timezoneOverride?: string
@@ -128,7 +147,9 @@ export class Tools {
     return enrichEntry(entry, ctx);
   }
 
+  // Enregistre les outils MCP de listing global : projets, membres, clients, tâches et tags.
   private registerListTools() {
+    // Tool MCP : liste tous les projets de l’organisation SolidTime.
     this.server.registerTool(
       'list_projects',
       {
@@ -149,6 +170,7 @@ export class Tools {
       }
     );
 
+    // Tool MCP : liste tous les membres de l’organisation SolidTime.
     this.server.registerTool(
       'list_members',
       {
@@ -169,6 +191,7 @@ export class Tools {
       }
     );
 
+    // Tool MCP : liste tous les clients de l’organisation SolidTime.
     this.server.registerTool(
       'list_clients',
       {
@@ -188,6 +211,7 @@ export class Tools {
       }
     );
 
+    // Tool MCP : liste les tâches SolidTime, avec filtre optionnel par project_id.
     this.server.registerTool(
       'list_tasks',
       {
@@ -213,6 +237,7 @@ export class Tools {
       }
     );
 
+    // Tool MCP : liste tous les tags disponibles dans l’organisation SolidTime.
     this.server.registerTool(
       'list_tags',
       {
@@ -233,7 +258,9 @@ export class Tools {
     );
   }
 
+  // Enregistre les outils MCP liés aux utilisateurs et au mapping Discord <-> SolidTime.
   private registerUserTools() {
+    // Tool MCP : liste les utilisateurs connus depuis le mapping local users.json.
     this.server.registerTool(
       'list_known_users',
       {
@@ -257,6 +284,8 @@ export class Tools {
       }
     );
 
+    // Tool MCP : résout un utilisateur via Discord ID, nom ou memberId SolidTime.
+    console.error('[MCP] registering tool:resolve_user');
     this.server.registerTool(
       'resolve_user',
       {
@@ -271,57 +300,171 @@ export class Tools {
         outputSchema: { data: z.any() }
       },
       async ({ discordId, name, memberId }) => {
+        console.error('[MCP][resolve_user] called', {
+          discordId,
+          name,
+          memberId
+        });
+
         let user;
-        if (discordId) user = findUserByDiscordId(discordId);
-        else if (name) user = findUserByName(name);
-        else if (memberId) user = findUserByMemberId(memberId);
-        else
+
+        if (discordId) {
+          user = findUserByDiscordId(discordId);
+        } else if (name) {
+          user = findUserByName(name);
+        } else if (memberId) {
+          user = findUserByMemberId(memberId);
+        } else {
+          console.error('[MCP][resolve_user] missing params');
+
           return errorPayload(
             'Provide one of: discordId, name, memberId.'
           );
+        }
 
-        if (!user)
+        console.error('[MCP][resolve_user] lookup result', {
+          found: !!user,
+          resolvedName: user?.name,
+          resolvedDiscordId: user?.discordId,
+          resolvedMemberId: user?.solidtime?.memberId
+        });
+
+        if (!user) {
           return errorPayload(
-            `No user found for ${JSON.stringify({ discordId, name, memberId })}`
+            `No user found for ${JSON.stringify({
+              discordId,
+              name,
+              memberId
+            })}`
           );
+        }
 
         return {
-          content: [{ type: 'text', text: JSON.stringify(user) }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(user)
+            }
+          ],
           structuredContent: { data: user }
         };
       }
     );
   }
 
-  private registerTimerTools() {
+  // Enregistre les outils MCP liés aux timers et aux entrées de temps SolidTime.
+  private registerTimeEntryTools() {
+    console.error('[MCP] registerTimeEntryTools:start');
+
+    // Tool MCP : résume les entrées de temps d’un utilisateur Discord sur une période donnée.
+    console.error('[MCP] registering tool:get_time_summary_by_discord_id');
     this.server.registerTool(
-      'get_active_timer',
+      'get_time_summary_by_discord_id',
       {
-        title: 'Get active timer',
+        title: 'Get time summary by Discord ID',
         description:
-          'Return the running time entry for the given member, or for the API token holder if memberId is omitted. Returns null if no timer is running. Times are formatted in the user timezone (Europe/Paris by default).',
+          'Return SolidTime time entries summary for a Discord user over a given period.',
         inputSchema: {
-          memberId: z
-            .string()
-            .uuid()
-            .optional()
-            .describe('SolidTime member_id. Omit to query the API token holder.'),
+          discordId: z.string().describe('Discord user ID from the current message author'),
+          start: z.string().describe('ISO 8601 lower bound.'),
+          end: z.string().describe('ISO 8601 upper bound.'),
           timezone: z
             .string()
             .optional()
-            .describe('IANA timezone for the formatted times (e.g. Europe/Paris).')
+            .describe('IANA timezone for the formatted times, e.g. Europe/Paris.')
         },
         outputSchema: { data: z.any() }
       },
-      async ({ memberId, timezone }) => {
-        const data = await this.tracker.getActiveTimer(memberId);
+      async ({ discordId, start, end, timezone }) => {
+        const user = findUserByDiscordId(discordId);
+
+        if (!user) {
+          return errorPayload(`No SolidTime mapping found for Discord user ${discordId}`);
+        }
+
+        const data = await this.tracker.listTimeEntries({
+          member_id: user.solidtime.memberId,
+          start: toSolidTimeDate(start),
+          end: toSolidTimeDate(end),
+          limit: 500
+        });
+
+        const needsTasks = data.some((entry) => !!entry.task_id);
+
+        const ctx = await this.buildFormatContext(
+          user.solidtime.memberId,
+          timezone,
+          { withTasks: needsTasks }
+        );
+
+        const enriched = data
+          .map((entry) => enrichEntry(entry, ctx))
+          .sort(
+            (a, b) =>
+              new Date(a.start).getTime() - new Date(b.start).getTime()
+          );
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: summarizeEntries(enriched)
+            }
+          ],
+          structuredContent: {
+            data: {
+              user: {
+                name: user.name,
+                discordId: user.discordId,
+                memberId: user.solidtime.memberId
+              },
+              range: {
+                start: toSolidTimeDate(start),
+                end: toSolidTimeDate(end),
+                timezone: timezone ?? timezoneForMember(user.solidtime.memberId)
+              },
+              entries: enriched
+            }
+          }
+        };
+      }
+    );
+
+    // Tool MCP : récupère le timer actif d’un utilisateur Discord.
+    console.error('[MCP] registering tool:get_active_timer_by_discord_id');
+    this.server.registerTool(
+      'get_active_timer_by_discord_id',
+      {
+        title: 'Get active timer by Discord ID',
+        description:
+          'Return the running time entry for the Discord user. Returns null if no timer is running.',
+        inputSchema: {
+          discordId: z.string().describe('Discord user ID from the current message author'),
+          timezone: z
+            .string()
+            .optional()
+            .describe('IANA timezone for the formatted times, e.g. Europe/Paris.')
+        },
+        outputSchema: { data: z.any() }
+      },
+      async ({ discordId, timezone }) => {
+        const user = findUserByDiscordId(discordId);
+
+        if (!user) {
+          return errorPayload(`No SolidTime mapping found for Discord user ${discordId}`);
+        }
+
+        const data = await this.tracker.getActiveTimer(user.solidtime.memberId);
+
         if (!data) {
           return {
-            content: [{ type: 'text', text: 'Aucun timer actif.' }],
+            content: [{ type: 'text', text: `Aucun timer actif pour ${user.name}.` }],
             structuredContent: { data: null }
           };
         }
+
         const enriched = await this.enrichOne(data, timezone);
+
         return {
           content: [
             { type: 'text', text: `Timer actif:\n- ${summarizeEntry(enriched)}` }
@@ -331,6 +474,8 @@ export class Tools {
       }
     );
 
+    // Tool MCP : démarre un timer SolidTime pour un membre donné.
+    console.error('[MCP] registering tool:start_timer');
     this.server.registerTool(
       'start_timer',
       {
@@ -412,6 +557,8 @@ export class Tools {
       }
     );
 
+    // Tool MCP : arrête le timer actif d’un membre donné.
+    console.error('[MCP] registering tool:stop_timer');
     this.server.registerTool(
       'stop_timer',
       {
@@ -451,9 +598,9 @@ export class Tools {
         };
       }
     );
-  }
 
-  private registerTimeEntryTools() {
+    // Tool MCP : liste les entrées de temps avec filtres avancés.
+    console.error('[MCP] registering tool:list_time_entries');
     this.server.registerTool(
       'list_time_entries',
       {
@@ -508,6 +655,8 @@ export class Tools {
       }
     );
 
+    // Tool MCP : crée une entrée de temps fermée avec début et fin explicites.
+    console.error('[MCP] registering tool:create_time_entry');  
     this.server.registerTool(
       'create_time_entry',
       {
@@ -561,6 +710,8 @@ export class Tools {
       }
     );
 
+    // Tool MCP : modifie partiellement une entrée de temps existante.
+    console.error('[MCP] registering tool:update_time_entry');
     this.server.registerTool(
       'update_time_entry',
       {
@@ -620,6 +771,8 @@ export class Tools {
       }
     );
 
+    // Tool MCP : supprime définitivement une entrée de temps.
+    console.error('[MCP] registering tool:delete_time_entry');
     this.server.registerTool(
       'delete_time_entry',
       {
@@ -638,5 +791,7 @@ export class Tools {
         };
       }
     );
+    
+    console.error('[MCP] registerTimeEntryTools:done');
   }
 }

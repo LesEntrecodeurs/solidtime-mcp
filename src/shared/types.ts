@@ -108,3 +108,16 @@ export interface UserMapping {
   timezone?: string;
   offDays?: string[];
 }
+
+export type FormattedTimeEntry = {
+  id: string;
+  projectId: string | null;
+  projectName: string;
+  description: string;
+  start: string;
+  end: string | null;
+  startLabel: string;
+  endLabel: string;
+  durationSeconds: number;
+  durationLabel: string;
+};
